@@ -1,5 +1,37 @@
 # ChangeLog
 
+### v1.1.4
+
+- Fix bug where lichen could grow to tiles adjacent to factories
+- Fix bug where if one factory fails to build a unit, all other factories fail to build units
+- Fix bugs for lichen growth on border overlapping a little
+- Fix bug with local CLI using different time setup to kaggle.
+- Transfers are irrelevant of unit ID now, and is completely simultaneous.
+- Fix bug in factory placement where if placement failed due to using too much metal, we set metal to `init_water`
+- Fix bug where printed collided agents is incorrect and shows previous collided units in the same turn
+- Fix bug for windows on python 3.7 with asyncio
+- Transfers and pickups happen at the end of a turn just before refining and powering
+- Fix engine crash where erroring on turn 0 crashes engine
+- Lichen growing positons are now computed after everything happens (dig, self destruct, movement)
+### v1.1.3
+
+- Fix bug with lichen frontiers being computed incorrectly
+- Fix bug where units could transfer more than they held into factories
+- Fix bug when traces were printed it errored instead.
+- Added some aggregate meta data for preparation of factions
+- Fixed critical bug in starter kit where units wasted their time expending energy sending a move center action
+### v1.1.2
+- Fix bug with C++ agents not running with CLI tool
+
+### v1.1.1
+
+- Allow "negative" bids to bid to go second instead of first in factory placement. The winning bidder is whoever has the higher absolute value bid. The winning bidder now loses water and metal equal to the absolute value of their bid.
+- Fixed bug in python kit that adds 1 to the water cost calculation in the `lux/factory.py` file
+- Removed an extra `1` in the state representation of move actions left from old code that allowed robots to move more than 1 tile.
+- Fixed bug where move center actions weren't repeated.
+- Fix visualizer bug where bid for player_1 showed up as player_0's bid
+- Fixed repeats. Now repeat `n` times means the action is repeatedly executed `n` times before the next action in the queue. Repeat `-1` means to move the action to the end of the queue.
+
 ### v1.1.0
 
 **Most Important Changes:**

@@ -2,7 +2,7 @@ from collections import OrderedDict, defaultdict
 import functools
 import math
 from typing import Dict, List, Set, Tuple, Union
-
+import traceback
 import numpy as np
 from pettingzoo import ParallelEnv
 from pettingzoo.utils import wrappers
@@ -58,8 +58,10 @@ def env():
 class LuxAI2022(ParallelEnv):
     metadata = {"render.modes": ["human", "html", "rgb_array"], "name": "luxai2022_v0"}
 
-    def __init__(self, **kwargs):
+    def __init__(self, collect_stats: bool = False, **kwargs):
+        self.collect_stats = collect_stats # note: added here instead of in configs since it would break existing bots
         default_config = EnvConfig(**kwargs)
+
         self.env_cfg = default_config
         self.possible_agents = ["player_" + str(r) for r in range(2)]
         self.agent_name_mapping = dict(zip(self.possible_agents, list(range(len(self.possible_agents)))))
@@ -101,10 +103,6 @@ class LuxAI2022(ParallelEnv):
         Renders the environment. In human mode, it can print to terminal, open
         up a graphical window, or open up some other display that a human can see and understand.
         """
-        # if len(self.agents) == 2:
-        #     string = ("Current state: Agent1: {} , Agent2: {}".format(MOVES[self.state[self.agents[0]]], MOVES[self.state[self.agents[1]]]))
-        # else:
-        #     string = "Game over"
 
         if mode == "human":
             if self._init_render():
@@ -170,6 +168,12 @@ class LuxAI2022(ParallelEnv):
         for agent in self.possible_agents:
             self.state.units[agent] = OrderedDict()
             self.state.factories[agent] = OrderedDict()
+            if self.collect_stats:
+                self.state.stats[agent] = dict(
+                    lichen_grown=0, lichen_lost=0, 
+                    units_lost=dict(LIGHT=0, HEAVY=0), 
+                    factories_lost=0, units_built=dict(LIGHT=0, HEAVY=0)
+                )
         obs = self.state.get_obs()
         observations = {agent: obs for agent in self.agents}
         return observations
@@ -201,8 +205,9 @@ class LuxAI2022(ParallelEnv):
                 self.state.teams[k].factories_to_place = self.state.board.factories_per_team
                 # verify bid is valid
                 valid_action = True
-                bid = a["bid"]
-                if bid < 0 or bid > self.state.teams[k].init_water:
+                bid = abs(a["bid"])
+                self.state.teams[k].bid = a["bid"]
+                if bid > self.state.teams[k].init_water:
                     valid_action = False
                 if not valid_action:
                     failed_agents[k] = True
@@ -211,18 +216,32 @@ class LuxAI2022(ParallelEnv):
                     highest_bid = bid
                     highest_bid_agent = k
                 elif bid == highest_bid:
-                    # if bids are the same, player 0 defaults to the winner and pays thebid.
+                    # if bids are the same, player 0 defaults to the winner and pays the bid.
                     highest_bid_agent = "player_0"
             else:
                 # team k loses
                 failed_agents[k] = True
+        for agent in self.agents:
+            if failed_agents[agent]:
+                return failed_agents
         if highest_bid_agent is None:
             # no valid bids made, all agents failed.
             pass
         else:
+            lowest_bid_agent = "player_1"
+            if highest_bid_agent == "player_1":
+                lowest_bid_agent = "player_0"
             self.state.teams[highest_bid_agent].init_water -= highest_bid
             self.state.teams[highest_bid_agent].init_metal -= highest_bid
-            self.state.teams[highest_bid_agent].place_first = True
+
+            # highest bid agent either won because of a tie, which then player_0 default wins, or because they had a stronger bid
+            # who ever wins will always get their choice
+            if self.state.teams[highest_bid_agent].bid < 0:
+                self.state.teams[highest_bid_agent].place_first = False
+                self.state.teams[lowest_bid_agent].place_first = True
+            else:
+                self.state.teams[highest_bid_agent].place_first = True
+                self.state.teams[lowest_bid_agent].place_first = False
         return failed_agents
     def _handle_factory_placement_step(self, actions):
         # factory placement rounds, which are sequential
@@ -261,7 +280,7 @@ class LuxAI2022(ParallelEnv):
                     a["water"] = self.state.teams[k].init_water
                     self._log(f" Warning - {k} does not have enough water. Using {a['water']}")
                 if a["metal"] > self.state.teams[k].init_metal:
-                    a["metal"] = self.state.teams[k].init_water
+                    a["metal"] = self.state.teams[k].init_metal
                     self._log(f" Warning - {k} does not have enough metal. Using {a['metal']}")
                 factory = self.add_factory(self.state.teams[k], a["spawn"])
                 if factory is None: continue
@@ -307,9 +326,20 @@ class LuxAI2022(ParallelEnv):
         return failed_agents
 
     def _handle_transfer_actions(self, actions_by_type: ActionsByType):
+        # It is important to first sub resource from all units, and then add
+        # resource to targets. Only When splitted into two loops, the transfer
+        # action is irrelevant to unit id.
+
+        # sub from unit cargo
+        amount_list = []
         for unit, transfer_action in actions_by_type["transfer"]:
             transfer_action: TransferAction
             transfer_amount = unit.sub_resource(transfer_action.resource, transfer_action.transfer_amount)
+            amount_list.append(transfer_amount)
+
+        # add to target cargo
+        for (unit, transfer_action), transfer_amount in zip(actions_by_type["transfer"], amount_list):
+            transfer_action: TransferAction
             transfer_pos: Position = unit.pos + move_deltas[transfer_action.transfer_dir]
             units_there = self.state.board.get_units_at(transfer_pos)
 
@@ -317,7 +347,7 @@ class LuxAI2022(ParallelEnv):
             factory_id = f"factory_{self.state.board.factory_occupancy_map[transfer_pos.x, transfer_pos.y]}"
             if factory_id in self.state.factories[unit.team.agent]:
                 factory = self.state.factories[unit.team.agent][factory_id]
-                actually_transferred = factory.add_resource(transfer_action.resource, transfer_action.transfer_amount)
+                actually_transferred = factory.add_resource(transfer_action.resource, transfer_amount)
             elif units_there is not None:
                 assert len(units_there) == 1, "Fatal error here, this is a bug"
                 target_unit = units_there[0]
@@ -354,6 +384,9 @@ class LuxAI2022(ParallelEnv):
             pos_hash = self.state.board.pos_hash(unit.pos)
             del self.state.board.units_map[pos_hash]
             self.destroy_unit(unit)
+            if self.collect_stats:
+                self.state.stats[unit.team.agent]["units_lost"][unit.unit_type.name] += 1
+
     def _handle_factory_build_actions(self, actions_by_type: ActionsByType, weather_cfg):
         for factory, factory_build_action in actions_by_type["factory_build"]:
             factory: Factory
@@ -366,19 +399,19 @@ class LuxAI2022(ParallelEnv):
             if factory_build_action.unit_type == UnitType.HEAVY:
                 if factory.cargo.metal < self.env_cfg.ROBOTS["HEAVY"].METAL_COST:
                     self._log(f"{factory} doesn't have enough metal to build a heavy despite having enough metal at the start of the turn. This is likely because a unit picked up some of the metal.")
-                    return
+                    continue
                 if factory.power < factory_build_action.power_cost:
                     self._log(f"{factory} doesn't have enough power to build a heavy despite having enough power at the start of the turn. This is likely because a unit picked up some of the power.")
-                    return
+                    continue
                 factory.sub_resource(3, self.env_cfg.ROBOTS["HEAVY"].METAL_COST)
                 factory.sub_resource(4, factory_build_action.power_cost)
             else:
                 if factory.cargo.metal < self.env_cfg.ROBOTS["LIGHT"].METAL_COST:
                     self._log(f"{factory} doesn't have enough metal to build a light despite having enough metal at the start of the turn. This is likely because a unit picked up some of the metal.")
-                    return
+                    continue
                 if factory.power < factory_build_action.power_cost:
                     self._log(f"{factory} doesn't have enough power to build a light despite having enough power at the start of the turn. This is likely because a unit picked up some of the power.")
-                    return
+                    continue
                 factory.sub_resource(3, self.env_cfg.ROBOTS["LIGHT"].METAL_COST)
                 factory.sub_resource(4, factory_build_action.power_cost)
             
@@ -387,6 +420,8 @@ class LuxAI2022(ParallelEnv):
                 unit_type=factory_build_action.unit_type,
                 pos=factory.pos.pos,
             )
+            if self.collect_stats:
+                self.state.stats[factory.team.agent]["units_built"][factory_build_action.unit_type.name] += 1
     def _handle_movement_actions(self, actions_by_type: ActionsByType, weather_cfg):
         new_units_map: Dict[str, List[Unit]] = defaultdict(list)
         heavy_entered_pos: Dict[str, List[Unit]] = defaultdict(list)
@@ -395,27 +430,26 @@ class LuxAI2022(ParallelEnv):
         for unit, move_action in actions_by_type["move"]:
             move_action: MoveAction
             # skip move center
-            if move_action.move_dir == 0:
-                continue
-            old_pos_hash = self.state.board.pos_hash(unit.pos)
-            target_pos = unit.pos + move_action.dist * move_deltas[move_action.move_dir]
-            power_required = move_action.power_cost
-            unit.pos = target_pos
-            new_pos_hash = self.state.board.pos_hash(unit.pos)
+            if move_action.move_dir != 0:
+                old_pos_hash = self.state.board.pos_hash(unit.pos)
+                target_pos = unit.pos + move_action.dist * move_deltas[move_action.move_dir]
+                power_required = move_action.power_cost
+                unit.pos = target_pos
+                new_pos_hash = self.state.board.pos_hash(unit.pos)
 
-            # remove unit from map temporarily
-            if len(self.state.board.units_map[old_pos_hash]) == 1:
-                del self.state.board.units_map[old_pos_hash]
-            else:
-                self.state.board.units_map[old_pos_hash].remove(unit)
+                # remove unit from map temporarily
+                if len(self.state.board.units_map[old_pos_hash]) == 1:
+                    del self.state.board.units_map[old_pos_hash]
+                else:
+                    self.state.board.units_map[old_pos_hash].remove(unit)
 
-            new_units_map[new_pos_hash].append(unit)
-            unit.power -= power_required
+                new_units_map[new_pos_hash].append(unit)
+                unit.power -= power_required
 
-            if unit.unit_type == UnitType.HEAVY:
-                heavy_entered_pos[new_pos_hash].append(unit)
-            else:
-                light_entered_pos[new_pos_hash].append(unit)
+                if unit.unit_type == UnitType.HEAVY:
+                    heavy_entered_pos[new_pos_hash].append(unit)
+                else:
+                    light_entered_pos[new_pos_hash].append(unit)
 
             unit.repeat_action(move_action)
 
@@ -423,9 +457,10 @@ class LuxAI2022(ParallelEnv):
             # add in all the stationary units
             new_units_map[pos_hash] += units
 
-        destroyed_units: Set[Unit] = set()
+        all_destroyed_units: Set[Unit] = set()
         new_units_map_after_collision: Dict[str, List[Unit]] = defaultdict(list)
         for pos_hash, units in new_units_map.items():
+            destroyed_units: Set[Unit] = set()
             if len(units) <= 1:
                 new_units_map_after_collision[pos_hash] += units
                 continue
@@ -434,6 +469,7 @@ class LuxAI2022(ParallelEnv):
                 for u in units:
                     destroyed_units.add(u)
                 self._log(f"{len(destroyed_units)} Units collided at {pos_hash}")
+                all_destroyed_units.update(destroyed_units)
             elif len(heavy_entered_pos[pos_hash]) > 0:
                 # all other units collide and break
                 surviving_unit = heavy_entered_pos[pos_hash][0]
@@ -442,6 +478,7 @@ class LuxAI2022(ParallelEnv):
                         destroyed_units.add(u)
                 self._log(f"{len(destroyed_units)} Units: ({', '.join([u.unit_id for u in destroyed_units])}) collided at {pos_hash} with {surviving_unit} surviving")
                 new_units_map_after_collision[pos_hash].append(surviving_unit)
+                all_destroyed_units.update(destroyed_units)
             else:
                 # check for stationary heavy unit there
                 surviving_unit = None
@@ -468,16 +505,21 @@ class LuxAI2022(ParallelEnv):
                     for u in units:
                         destroyed_units.add(u)
                     self._log(f"{len(destroyed_units)} Units collided at {pos_hash}")
+                    all_destroyed_units.update(destroyed_units)
                 else:
                     for u in units:
                         if u.unit_id != surviving_unit.unit_id:
                             destroyed_units.add(u)
                     self._log(f"{len(destroyed_units)} Units collided at {pos_hash} with {surviving_unit} surviving")
                     new_units_map_after_collision[pos_hash].append(surviving_unit)
+                    all_destroyed_units.update(destroyed_units)
         self.state.board.units_map = new_units_map_after_collision
 
-        for u in destroyed_units:
+        for u in all_destroyed_units:
             self.destroy_unit(u)
+            if self.collect_stats:
+                self.state.stats[u.team.agent]["units_lost"][u.unit_type.name] += 1
+
     def _handle_recharge_actions(self, actions_by_type: ActionsByType):
         # for recharging actions, check if unit has enough power. If not, add action back to the queue
         for unit, recharge_action in actions_by_type["recharge"]:
@@ -491,7 +533,10 @@ class LuxAI2022(ParallelEnv):
         for factory, factory_water_action in actions_by_type["factory_water"]:
             factory_water_action: FactoryWaterAction
             water_cost = factory.water_cost(self.env_cfg)
-            factory.cargo.water -= water_cost # earlier validation ensures this is always possible.
+            if water_cost > factory.cargo.water:
+                self._log(f"{factory} has insufficient water to grow lichen, factory has {factory.cargo.water}, but requires {water_cost} to water lichen. This cost may have changed a little during this turn due to rubble changes and new tiles being grown on")
+                continue
+            factory.cargo.water -= water_cost 
             indexable_positions = ([v[0] for v in factory.grow_lichen_positions], [v[1] for v in factory.grow_lichen_positions])
             self.state.board.lichen[indexable_positions] += 2
             self.state.board.lichen_strains[indexable_positions] = factory.num_id
@@ -517,7 +562,6 @@ class LuxAI2022(ParallelEnv):
             early_game = True
         if self.env_cfg.BIDDING_SYSTEM and self.state.real_env_steps < 0:
             early_game = True
-
         if early_game:
             failed_agents = self._step_early_game(actions)
         else:
@@ -561,7 +605,7 @@ class LuxAI2022(ParallelEnv):
                             self.state.units[agent][unit_id].action_queue = formatted_actions
                 except Exception as e:
                     # catch errors when trying to format unit or factory actions
-                    print(e.with_traceback())
+                    print(traceback.format_exc())
                     failed_agents[agent] = True
         
             # 2. store actions by type
@@ -579,27 +623,41 @@ class LuxAI2022(ParallelEnv):
                         unit_a: Action = factory.action_queue.pop(0)
                         actions_by_type[unit_a.act_type].append((factory, unit_a))
 
-            for agent in self.agents:
-                for factory in self.state.factories[agent].values():
-                    # update information for lichen growing and cache it
-                    factory.cache_water_info(self.state.board, self.env_cfg)
-
             # 3. validate all actions against current state, throw away impossible actions
             actions_by_type = validate_actions(self.env_cfg, self.state, actions_by_type, verbose=self.env_cfg.verbose, weather_cfg=weather_cfg)
 
-            self._handle_transfer_actions(actions_by_type)
-            self._handle_pickup_actions(actions_by_type)
+            if self.collect_stats:
+                lichen_before = self.state.board.lichen.copy()
+                lichen_strains_before = self.state.board.lichen_strains.copy()
+
             self._handle_dig_actions(actions_by_type, weather_cfg)
             self._handle_self_destruct_actions(actions_by_type)
             self._handle_factory_build_actions(actions_by_type, weather_cfg)
             self._handle_movement_actions(actions_by_type, weather_cfg)
             self._handle_recharge_actions(actions_by_type)
+            
+            for agent in self.agents:
+                for factory in self.state.factories[agent].values():
+                    # update information for lichen growing and cache it
+                    factory.cache_water_info(self.state.board, self.env_cfg)
+            
             self._handle_factory_water_actions(actions_by_type)
+            self._handle_transfer_actions(actions_by_type)
+            self._handle_pickup_actions(actions_by_type)
             
             # Update lichen
             self.state.board.lichen -= 1
             self.state.board.lichen = self.state.board.lichen.clip(0, self.env_cfg.MAX_LICHEN_PER_TILE)
             self.state.board.lichen_strains[self.state.board.lichen == 0] = -1
+            if self.collect_stats:
+                lichen_change = self.state.board.lichen - lichen_before
+                for agent in self.agents:
+                    for strain in self.state.teams[agent].factory_strains:
+                        start_of_step_lichen_tiles: np.ndarray = lichen_change[lichen_strains_before == strain]
+                        lichen_lost = start_of_step_lichen_tiles[start_of_step_lichen_tiles < 0].sum()
+                        lichen_gained = start_of_step_lichen_tiles.sum() - lichen_lost
+                        self.state.stats[agent]["lichen_grown"] += lichen_gained
+                        self.state.stats[agent]["lichen_lost"] -= lichen_lost
 
             # resources refining
             for agent in self.agents:
@@ -612,6 +670,8 @@ class LuxAI2022(ParallelEnv):
                 for factory in factories_to_destroy:
                     # destroy factories that ran out of water
                     self.destroy_factory(factory)
+                    if self.collect_stats:
+                        self.state.stats[factory.team.agent]["factories_lost"] += 1
             # power gain
             if is_day(self.env_cfg, self.state.real_env_steps):
                 for agent in self.agents:

@@ -20,7 +20,7 @@ The rest of the document will go through the key features of this game.
 
 The world of Lux is represented as a 2d grid. Coordinates increase east (right) and south (down). The map is always a square and is 48 tiles long. The (0, 0) coordinate is at the top left. The map has various features including [Raw Resources](#resources) (Ice, Ore), [Refined Resources](#resources) (Water, Metal), [Robots](#robots) (Light, Heavy), [Factories](#factories), [Rubble](#movement-collisions-and-rubble), and [Lichen](#lichen). The map also includes a schedule of martian weather events impacting the environment discussed below. Code wise, the coordinate (x, y) in a map feature such as rubble is indexed by `board.rubble[x][y]` for ease of use.
 
-In order to prevent maps from favoring one player over another, it is guaranteed that maps are always symmetric by vertical or horizontal reflection. Each player will start the game by bidding on an extra factory, then placing several Factories and specifying their starting resources. See the [Starting Phase](#starting-phase) for more details.
+Each player will start the game by bidding on an extra factory, then placing several Factories and specifying their starting resources. See the [Starting Phase](#starting-phase) for more details.
 
 ## Weather Events
 
@@ -74,7 +74,9 @@ There are two kinds of raw resources: Ice and Ore which can be refined by a fact
 
 ## Starting Phase
 
-During the first turn of the game, each player is given the map, starting resources (`N` factories and `N*150` water and ore), and are asked to bid on an extra factory. Each 1 bid removes 1 water and 1 ore from that player's starting resources. Each player responds in turn 1 with their bid. Whichever player places the highest bid loses X water and ore from their starting resources and gets to place first. If both players tie, the first player / player_0 gets to place first. The player that places first always loses how much they bid.
+During the first turn of the game, each player is given the map, starting resources (`N` factories and `N*150` water and ore), and are asked to bid for who goes first/second. Each 1 bid removes 1 water and 1 ore from that player's starting resources. Each player responds in turn 1 with their bid, which can be positive to prefer going first or negative to prefer going second.
+
+Whichever player places the highest absolute bid loses that amount of water and ore from their starting resources and gets to place first (or second if they bid a negative value). If both players tie in bid amount, then the first player / player_0 wins the bid.
 
 During the next `2*N` turns of the game, each player alternates between spawning a factory or doing nothing as the other player spawns a factory with the winner of the bid placing first. Each player may select any location on the map that can fit a 3x3 factory that doesn't overlap any ice/ore resources, and the center is 6 tiles or more away from another existing factory's center. Any factories our starting resources not used are lost.
 
@@ -83,7 +85,7 @@ _Strategy Tip_: Going first is not always advantageous!
 
 [Robots](#robots) and [Factories](#factories) can perform actions each turn given certain conditions and enough power to do so. In general, all actions are simultaneously applied and are validated against the state of the game at the start of a turn. Each turn players can give an action to each factory and a queue of actions to each robot. 
 
-[Robots](#robots) always execute actions in the order of their current action queue. [Robot](#robots) actions can also be configured to be repeated `n` times or infinitely. Action repeats mean once the action is executed the action is replaced to the back of the action queue instead of being removed. Moreover, if an action in the queue fails to execute due to lack of power, that action is not removed from the queue and is kept at the front of the queue.
+[Robots](#robots) always execute actions in the order of their current action queue. [Robot](#robots) actions can also be configured to be repeated `n` times or infinitely. Non-infinite action repeats mean once the action is executed `n` times succesfully, it is then removed from the action queue. When repeating infinitely `repeat = -1`, then once it is succesfully executed it is moved back to the end of the queue. Moreover, if an action in the queue fails to execute due to lack of power, that action is not removed from the queue and is kept at the front of the queue.
 
 Submitting a new action queue for a robot requires the robot to use additional power to replace it's action queue. It costs an additional 1 power for Lights, an additional 10 power for Heavies. The new action queue is then stored and wipes out what was stored previously. If the robot does not have enough power, the action queue is simply not replaced.
 
@@ -285,7 +287,7 @@ At the end of the game, the amount of lichen on each square that a player owns i
 
 At the start, factories can perform the water action to start or continue lichen growing. Taking this action will seed lichen in all orthogonally adjacent squares to the factory if there is no rubble present (total of 3*4=12). Whenever a tile has a lichen value of 10 or more and is watered, it will spread lichen to adjacent tiles without rubble, resources, or factories and give them lichen values of 1. The amount of water consumed by the water action grows with the number of tiles with lichen on them connected to the factory according to `ceil(# connected lichen tiles / 10)`. In each tile a maximum of 100 lichen value can be stored.
 
-All factories have their own special strains of lichen that can’t mix, so lichen tiles cannot spread to tiles adjacent to lichen tiles from other factories. Algorithmically, if a tile can be expanded to by two lichen strains, neither strain expands to there. This is for determinism and simplified water costs.
+All factories have their own special strains of lichen that can’t mix, so lichen tiles cannot spread to tiles adjacent to lichen tiles from other factories. This is for determinism and simplified water costs.
 
 When rubble is added to a tile, that tile loses all lichen.
 
@@ -300,12 +302,12 @@ To help avoid confusion over smaller details of how each turn is resolved, we pr
 Actions in the game are first all validated against the current game state to see if they are valid. Then the actions, along with game events, are resolved in the following order and simultaneously within each step
 
 1. Agents submit actions for robots, overwrite their action queues
-2. Transfer resources and power
-3. Pickup resources and power (in order of robot id)
-4. Digging, self-destruct actions (removing and adding rubble)
-5. Movement and recharge actions execute, then collisions are resolved
-6. Factories that watered their tiles grow lichen
-7. Robot Building
+2. Digging, self-destruct actions (removing and adding rubble)
+3. Robot Building
+4. Movement and recharge actions execute, then collisions are resolved
+5. Factories that watered their tiles grow lichen
+6. Transfer resources and power
+7. Pickup resources and power (in order of robot id)
 8. Factories refine resources
 9. Power gain (if started during day for robots)
 
